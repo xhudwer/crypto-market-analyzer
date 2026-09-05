@@ -1,281 +1,143 @@
 from collections import defaultdict, deque
 from threading import RLock
-import time
+
+from config import MAX_FLOW_EVENTS
 
 
 class MarketStore:
-
-    def __init__(self, max_flow_events=5000):
-
+    def __init__(self):
         self.lock = RLock()
 
-        # Текущий список инструментов TOP-30
         self.symbols = []
 
-        # Свечи:
-        # candles[BTCUSDT]["15m"]
         self.candles = defaultdict(
             lambda: defaultdict(list)
         )
 
-        # Последний ticker по каждому инструменту
         self.tickers = {}
 
-        # История Open Interest
         self.oi_history = defaultdict(
             lambda: deque(maxlen=300)
         )
 
-        # Поток реальных сделок
         self.trades = defaultdict(
-            lambda: deque(
-                maxlen=max_flow_events
-            )
+            lambda: deque(maxlen=MAX_FLOW_EVENTS)
         )
 
-        # Ликвидации
         self.liquidations = defaultdict(
             lambda: deque(maxlen=2000)
         )
 
-        # Время последнего WebSocket-события
         self.last_ws_event = {}
-
-        # Последняя ошибка
-        self.last_error = None
-
-    # --------------------------------------------------
-    # SYMBOLS
-    # --------------------------------------------------
+        self.last_error = {}
 
     def set_symbols(self, symbols):
-
         with self.lock:
-
             self.symbols = list(symbols)
 
-    # --------------------------------------------------
-    # CANDLES
-    # --------------------------------------------------
-
-    def set_candles(
-        self,
-        symbol,
-        timeframe,
-        candles
-    ):
-
+    def get_symbols(self):
         with self.lock:
+            return list(self.symbols)
 
-            self.candles[symbol][
-                timeframe
-            ] = list(candles)
-
-    def upsert_candle(
-        self,
-        symbol,
-        timeframe,
-        candle
-    ):
-
+    def set_candles(self, symbol, interval, candles):
         with self.lock:
+            self.candles[symbol][interval] = list(candles)
 
-            candles = self.candles[
-                symbol
-            ][timeframe]
+    def upsert_candle(self, symbol, interval, candle):
+        with self.lock:
+            candles = self.candles[symbol][interval]
 
-            # Если это обновление
-            # уже существующей свечи
-            if (
-                candles
-                and candles[-1]["start"]
-                == candle["start"]
-            ):
+            if not candles:
+                candles.append(candle)
+                return
 
+            last = candles[-1]
+
+            if candle["start"] == last["start"]:
                 candles[-1] = candle
 
-            # Если пришла новая свеча
-            elif (
-                not candles
-                or candles[-1]["start"]
-                < candle["start"]
-            ):
-
+            elif candle["start"] > last["start"]:
                 candles.append(candle)
 
-            # Если сообщение пришло
-            # не по порядку
             else:
-
-                for i, old in enumerate(
-                    candles
-                ):
-
-                    if (
-                        old["start"]
-                        == candle["start"]
-                    ):
-
-                        candles[i] = candle
-
+                for index, existing in enumerate(candles):
+                    if existing["start"] == candle["start"]:
+                        candles[index] = candle
                         break
 
-            # Не позволяем памяти
-            # бесконечно расти
-            if len(candles) > 1000:
-
-                del candles[:-1000]
-
-    # --------------------------------------------------
-    # TICKER / OI / FUNDING
-    # --------------------------------------------------
-
-    def set_ticker(
-        self,
-        symbol,
-        data
-    ):
-
+    def set_ticker(self, symbol, data):
         with self.lock:
+            current = self.tickers.get(symbol, {})
 
-            old = self.tickers.get(
-                symbol,
-                {}
-            )
+            current.update(data)
 
-            # Bybit ticker работает
-            # через snapshot + delta.
-            # Поэтому объединяем старое
-            # состояние с новым.
-            merged = dict(old)
+            self.tickers[symbol] = current
 
-            merged.update(data)
-
-            self.tickers[
-                symbol
-            ] = merged
-
-            now = time.time()
-
-            self.last_ws_event[
-                symbol
-            ] = now
-
-            # OI сохраняем во временной
-            # истории для расчёта изменения
-            if (
-                "openInterest"
-                in merged
-            ):
-
+            if "openInterest" in current:
                 try:
-
-                    oi = float(
-                        merged[
-                            "openInterest"
-                        ]
-                    )
-
-                    self.oi_history[
-                        symbol
-                    ].append(
-                        (
-                            now,
-                            oi
-                        )
-                    )
-
-                except (
-                    TypeError,
-                    ValueError
-                ):
-
+                    self.oi_history[symbol].append({
+                        "timestamp": current.get("timestamp"),
+                        "open_interest": float(
+                            current["openInterest"]
+                        ),
+                    })
+                except (TypeError, ValueError):
                     pass
 
-    # --------------------------------------------------
-    # PUBLIC TRADES
-    # --------------------------------------------------
+            self.last_ws_event[symbol] = (
+                data.get("timestamp")
+            )
 
-    def add_trade(
-        self,
-        symbol,
-        event
-    ):
-
+    def add_trade(self, symbol, trade):
         with self.lock:
+            self.trades[symbol].append(trade)
 
-            self.trades[
-                symbol
-            ].append(event)
+            self.last_ws_event[symbol] = (
+                trade.get("timestamp")
+            )
 
-    # --------------------------------------------------
-    # LIQUIDATIONS
-    # --------------------------------------------------
-
-    def add_liquidation(
-        self,
-        symbol,
-        event
-    ):
-
+    def add_liquidation(self, symbol, liquidation):
         with self.lock:
+            self.liquidations[symbol].append(
+                liquidation
+            )
 
-            self.liquidations[
-                symbol
-            ].append(event)
+            self.last_ws_event[symbol] = (
+                liquidation.get("timestamp")
+            )
 
-    # --------------------------------------------------
-    # SNAPSHOT
-    # --------------------------------------------------
-
-    def snapshot_symbol(
-        self,
-        symbol
-    ):
-
+    def snapshot_symbol(self, symbol):
         with self.lock:
-
             return {
+                "symbol": symbol,
 
                 "candles": {
-                    timeframe: list(
-                        self.candles[
-                            symbol
-                        ][timeframe]
-                    )
-                    for timeframe
-                    in self.candles[
-                        symbol
-                    ]
+                    interval: list(candles)
+                    for interval, candles
+                    in self.candles[symbol].items()
                 },
 
                 "ticker": dict(
-                    self.tickers.get(
-                        symbol,
-                        {}
-                    )
+                    self.tickers.get(symbol, {})
                 ),
 
                 "oi_history": list(
-                    self.oi_history[
-                        symbol
-                    ]
+                    self.oi_history[symbol]
                 ),
 
                 "trades": list(
-                    self.trades[
-                        symbol
-                    ]
+                    self.trades[symbol]
                 ),
 
                 "liquidations": list(
-                    self.liquidations[
-                        symbol
-                    ]
+                    self.liquidations[symbol]
                 ),
 
-                "last_ws_event":
-                    self.last_ws_event.get(
-                        symbol
-                    ),
+                "last_ws_event": (
+                    self.last_ws_event.get(symbol)
+                ),
+
+                "last_error": (
+                    self.last_error.get(symbol)
+                ),
             }
