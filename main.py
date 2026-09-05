@@ -1,30 +1,30 @@
-import requests
+import os
 import time
+import threading
+import requests
+from fastapi import FastAPI
 
+app = FastAPI()
 
-BASE_URL = "https://api.bybit.com"
+BYBIT_URL = "https://api.bybit.com"
 
 
 def get_top_30():
-    url = f"{BASE_URL}/v5/market/tickers"
-    
-    params = {
-        "category": "linear"
-    }
+    response = requests.get(
+        f"{BYBIT_URL}/v5/market/tickers",
+        params={"category": "linear"},
+        timeout=10
+    )
 
-    response = requests.get(url, params=params, timeout=10)
     response.raise_for_status()
-
     data = response.json()
 
     if data["retCode"] != 0:
         raise Exception(data["retMsg"])
 
-    tickers = data["result"]["list"]
+    result = []
 
-    usdt_contracts = []
-
-    for ticker in tickers:
+    for ticker in data["result"]["list"]:
         symbol = ticker["symbol"]
 
         if not symbol.endswith("USDT"):
@@ -37,48 +37,74 @@ def get_top_30():
         except (ValueError, TypeError):
             continue
 
-        usdt_contracts.append({
+        result.append({
             "symbol": symbol,
-            "turnover": turnover,
             "price": price,
+            "turnover": turnover,
             "change": change
         })
 
-    usdt_contracts.sort(
+    result.sort(
         key=lambda x: x["turnover"],
         reverse=True
     )
 
-    return usdt_contracts[:30]
+    return result[:30]
 
 
-def main():
-    print("=" * 60)
-    print("CRYPTO MARKET ANALYZER")
-    print("Bybit — TOP 30 USDT Perpetual")
-    print("=" * 60)
-
+def market_monitor():
     while True:
         try:
             coins = get_top_30()
 
-            print("\nTOP 30:\n")
+            print("\n" + "=" * 60)
+            print("BYBIT MARKET ANALYZER")
+            print("=" * 60)
 
-            for i, coin in enumerate(coins, 1):
+            for number, coin in enumerate(coins, 1):
                 print(
-                    f"{i:2}. "
+                    f"{number:2}. "
                     f"{coin['symbol']:15} "
-                    f"${coin['turnover']:,.0f} "
-                    f"{coin['change']:+.2f}%"
+                    f"Price: {coin['price']} "
+                    f"24h: {coin['change']:+.2f}% "
+                    f"Volume: ${coin['turnover']:,.0f}"
                 )
 
-            print("\nОбновление через 60 секунд...")
+            print("=" * 60)
 
         except Exception as error:
-            print(f"\nОшибка: {error}")
+            print(f"ERROR: {error}")
 
         time.sleep(60)
 
 
+@app.get("/")
+def home():
+    return {
+        "status": "online",
+        "service": "Crypto Market Analyzer",
+        "exchange": "Bybit"
+    }
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
 if __name__ == "__main__":
-    main()
+    thread = threading.Thread(
+        target=market_monitor,
+        daemon=True
+    )
+    thread.start()
+
+    import uvicorn
+
+    port = int(os.environ.get("PORT", 10000))
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port
+    )
