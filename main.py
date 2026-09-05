@@ -8,22 +8,23 @@ app = FastAPI()
 
 BYBIT_URL = "https://api.bybit.com"
 
+TOP_COINS = 30
+CANDLE_LIMIT = 100
+MONITOR_INTERVAL = 60
+
 
 # ============================================================
-# BYBIT — TOP 30 COINS
+# BYBIT
 # ============================================================
 
 def get_top_30():
     response = requests.get(
         f"{BYBIT_URL}/v5/market/tickers",
-        params={
-            "category": "linear"
-        },
+        params={"category": "linear"},
         timeout=10
     )
 
     response.raise_for_status()
-
     data = response.json()
 
     if data["retCode"] != 0:
@@ -32,22 +33,15 @@ def get_top_30():
     result = []
 
     for ticker in data["result"]["list"]:
-
         symbol = ticker["symbol"]
 
-        # Только USDT perpetual
         if not symbol.endswith("USDT"):
-            continue
-
-        # Исключаем потенциальные невалидные инструменты
-        if ticker.get("lastPrice") in ("", None):
             continue
 
         try:
             turnover = float(ticker["turnover24h"])
             price = float(ticker["lastPrice"])
             change = float(ticker["price24hPcnt"]) * 100
-
         except (ValueError, TypeError):
             continue
 
@@ -58,21 +52,15 @@ def get_top_30():
             "change": change
         })
 
-    # Сортировка по 24h обороту
     result.sort(
         key=lambda x: x["turnover"],
         reverse=True
     )
 
-    return result[:30]
+    return result[:TOP_COINS]
 
 
-# ============================================================
-# BYBIT — CANDLES
-# ============================================================
-
-def get_klines(symbol, interval, limit=100):
-
+def get_klines(symbol, interval, limit=CANDLE_LIMIT):
     response = requests.get(
         f"{BYBIT_URL}/v5/market/kline",
         params={
@@ -85,7 +73,6 @@ def get_klines(symbol, interval, limit=100):
     )
 
     response.raise_for_status()
-
     data = response.json()
 
     if data["retCode"] != 0:
@@ -94,7 +81,6 @@ def get_klines(symbol, interval, limit=100):
     candles = []
 
     for candle in data["result"]["list"]:
-
         candles.append({
             "timestamp": int(candle[0]),
             "open": float(candle[1]),
@@ -105,51 +91,31 @@ def get_klines(symbol, interval, limit=100):
             "turnover": float(candle[6])
         })
 
-    # Bybit отдаёт свечи от новых к старым.
-    # Переворачиваем: старые → новые.
     candles.reverse()
 
     return candles
 
 
 # ============================================================
-# ЗАГРУЗКА ДАННЫХ ПО 30 МОНЕТАМ
+# ЗАГРУЗКА РЫНКА
 # ============================================================
 
 def load_market_data(coins):
-
     market_data = []
 
     for number, coin in enumerate(coins, 1):
-
         symbol = coin["symbol"]
 
         try:
-
-            candles_15m = get_klines(
-                symbol,
-                "15",
-                100
-            )
-
-            candles_1h = get_klines(
-                symbol,
-                "60",
-                100
-            )
-
-            candles_4h = get_klines(
-                symbol,
-                "240",
-                100
-            )
+            candles_15m = get_klines(symbol, "15")
+            candles_1h = get_klines(symbol, "60")
+            candles_4h = get_klines(symbol, "240")
 
             market_data.append({
                 "symbol": symbol,
                 "price": coin["price"],
                 "change": coin["change"],
                 "turnover": coin["turnover"],
-
                 "candles": {
                     "15m": candles_15m,
                     "1h": candles_1h,
@@ -158,7 +124,7 @@ def load_market_data(coins):
             })
 
             print(
-                f"[{number:02}/30] "
+                f"[{number:02}/{TOP_COINS}] "
                 f"{symbol} | "
                 f"15m={len(candles_15m)} | "
                 f"1h={len(candles_1h)} | "
@@ -167,9 +133,8 @@ def load_market_data(coins):
             )
 
         except Exception as error:
-
             print(
-                f"[{number:02}/30] "
+                f"[{number:02}/{TOP_COINS}] "
                 f"{symbol} ERROR: {error}",
                 flush=True
             )
@@ -178,69 +143,44 @@ def load_market_data(coins):
 
 
 # ============================================================
-# ПОИСК SWING HIGH / SWING LOW
+# SWING POINTS
 # ============================================================
 
 def find_swing_points(candles, window=3):
-
     highs = []
     lows = []
 
-    for i in range(
-        window,
-        len(candles) - window
-    ):
-
+    for i in range(window, len(candles) - window):
         current_high = candles[i]["high"]
         current_low = candles[i]["low"]
 
         left_highs = [
             candles[j]["high"]
-            for j in range(
-                i - window,
-                i
-            )
+            for j in range(i - window, i)
         ]
 
         right_highs = [
             candles[j]["high"]
-            for j in range(
-                i + 1,
-                i + window + 1
-            )
+            for j in range(i + 1, i + window + 1)
         ]
 
         left_lows = [
             candles[j]["low"]
-            for j in range(
-                i - window,
-                i
-            )
+            for j in range(i - window, i)
         ]
 
         right_lows = [
             candles[j]["low"]
-            for j in range(
-                i + 1,
-                i + window + 1
-            )
+            for j in range(i + 1, i + window + 1)
         ]
 
-        # Swing High
-        if current_high > max(
-            left_highs + right_highs
-        ):
-
+        if current_high > max(left_highs + right_highs):
             highs.append({
                 "index": i,
                 "price": current_high
             })
 
-        # Swing Low
-        if current_low < min(
-            left_lows + right_lows
-        ):
-
+        if current_low < min(left_lows + right_lows):
             lows.append({
                 "index": i,
                 "price": current_low
@@ -250,17 +190,322 @@ def find_swing_points(candles, window=3):
 
 
 # ============================================================
-# АНАЛИЗ СТРУКТУРЫ
+# STRUKTURA HH / HL / LH / LL
 # ============================================================
 
-def analyze_structure(candles):
+def classify_structure(highs, lows):
+    high_structure = []
+    low_structure = []
 
-    if len(candles) < 20:
+    for i in range(1, len(highs)):
+        previous = highs[i - 1]["price"]
+        current = highs[i]["price"]
 
+        high_structure.append(
+            "HH" if current > previous else "LH"
+        )
+
+    for i in range(1, len(lows)):
+        previous = lows[i - 1]["price"]
+        current = lows[i]["price"]
+
+        low_structure.append(
+            "HL" if current > previous else "LL"
+        )
+
+    return high_structure, low_structure
+
+
+# ============================================================
+# TREND
+# ============================================================
+
+def determine_trend(high_structure, low_structure):
+    recent_highs = high_structure[-5:]
+    recent_lows = low_structure[-5:]
+
+    bullish = (
+        recent_highs.count("HH") +
+        recent_lows.count("HL")
+    )
+
+    bearish = (
+        recent_highs.count("LH") +
+        recent_lows.count("LL")
+    )
+
+    total = bullish + bearish
+
+    if total == 0:
+        return "UNKNOWN", 0
+
+    difference = bullish - bearish
+
+    strength = round(
+        abs(difference) / total * 100,
+        1
+    )
+
+    if difference >= 2:
+        return "UP", strength
+
+    if difference <= -2:
+        return "DOWN", strength
+
+    return "RANGE", strength
+
+
+# ============================================================
+# MOMENTUM
+# ============================================================
+
+def calculate_momentum(candles, lookback=10):
+    if len(candles) <= lookback:
         return {
+            "direction": "UNKNOWN",
+            "change_pct": 0
+        }
+
+    current = candles[-1]["close"]
+    previous = candles[-1 - lookback]["close"]
+
+    if previous == 0:
+        return {
+            "direction": "UNKNOWN",
+            "change_pct": 0
+        }
+
+    change_pct = (
+        (current - previous) /
+        previous
+        * 100
+    )
+
+    if change_pct > 1:
+        direction = "POSITIVE"
+    elif change_pct < -1:
+        direction = "NEGATIVE"
+    else:
+        direction = "NEUTRAL"
+
+    return {
+        "direction": direction,
+        "change_pct": round(change_pct, 2)
+    }
+
+
+# ============================================================
+# ATR / VOLATILITY
+# ============================================================
+
+def calculate_atr(candles, period=14):
+    if len(candles) < period + 1:
+        return 0
+
+    true_ranges = []
+
+    for i in range(1, len(candles)):
+        high = candles[i]["high"]
+        low = candles[i]["low"]
+        previous_close = candles[i - 1]["close"]
+
+        true_range = max(
+            high - low,
+            abs(high - previous_close),
+            abs(low - previous_close)
+        )
+
+        true_ranges.append(true_range)
+
+    recent = true_ranges[-period:]
+
+    return sum(recent) / len(recent)
+
+
+def calculate_volatility(candles):
+    atr = calculate_atr(candles)
+
+    price = candles[-1]["close"]
+
+    if price == 0:
+        return {
+            "atr": 0,
+            "atr_pct": 0
+        }
+
+    atr_pct = atr / price * 100
+
+    return {
+        "atr": round(atr, 8),
+        "atr_pct": round(atr_pct, 3)
+    }
+
+
+# ============================================================
+# VOLUME
+# ============================================================
+
+def analyze_volume(candles, period=20):
+    if len(candles) < period + 1:
+        return {
+            "current": 0,
+            "average": 0,
+            "ratio": 0,
+            "state": "UNKNOWN"
+        }
+
+    current = candles[-1]["volume"]
+
+    previous = [
+        candle["volume"]
+        for candle in candles[-period - 1:-1]
+    ]
+
+    average = sum(previous) / len(previous)
+
+    if average == 0:
+        ratio = 0
+    else:
+        ratio = current / average
+
+    if ratio >= 2:
+        state = "EXTREME"
+    elif ratio >= 1.3:
+        state = "HIGH"
+    elif ratio <= 0.7:
+        state = "LOW"
+    else:
+        state = "NORMAL"
+
+    return {
+        "current": round(current, 4),
+        "average": round(average, 4),
+        "ratio": round(ratio, 2),
+        "state": state
+    }
+
+
+# ============================================================
+# SUPPORT / RESISTANCE
+# ============================================================
+
+def calculate_levels(candles, highs, lows):
+    current_price = candles[-1]["close"]
+
+    recent_highs = [
+        item["price"]
+        for item in highs
+        if item["price"] > current_price
+    ]
+
+    recent_lows = [
+        item["price"]
+        for item in lows
+        if item["price"] < current_price
+    ]
+
+    resistance = (
+        min(recent_highs)
+        if recent_highs
+        else None
+    )
+
+    support = (
+        max(recent_lows)
+        if recent_lows
+        else None
+    )
+
+    return {
+        "support": support,
+        "resistance": resistance
+    }
+
+
+# ============================================================
+# RANGE POSITION
+# ============================================================
+
+def calculate_range_position(candles, lookback=50):
+    recent = candles[-lookback:]
+
+    highest = max(
+        candle["high"]
+        for candle in recent
+    )
+
+    lowest = min(
+        candle["low"]
+        for candle in recent
+    )
+
+    current = candles[-1]["close"]
+
+    if highest == lowest:
+        position = 50
+    else:
+        position = (
+            (current - lowest) /
+            (highest - lowest)
+            * 100
+        )
+
+    return {
+        "high": highest,
+        "low": lowest,
+        "position_pct": round(position, 1)
+    }
+
+
+# ============================================================
+# BREAKOUT
+# ============================================================
+
+def detect_breakout(candles, highs, lows):
+    current = candles[-1]
+    previous = candles[-2]
+
+    recent_high = (
+        max(item["price"] for item in highs[-5:])
+        if highs
+        else None
+    )
+
+    recent_low = (
+        min(item["price"] for item in lows[-5:])
+        if lows
+        else None
+    )
+
+    breakout = "NONE"
+
+    if recent_high is not None:
+        if (
+            current["close"] > recent_high
+            and previous["close"] <= recent_high
+        ):
+            breakout = "BREAKOUT_UP"
+
+    if recent_low is not None:
+        if (
+            current["close"] < recent_low
+            and previous["close"] >= recent_low
+        ):
+            breakout = "BREAKOUT_DOWN"
+
+    return breakout
+
+
+# ============================================================
+# MARKET STATE
+# ============================================================
+
+def analyze_market_state(candles):
+    if len(candles) < 30:
+        return {
+            "regime": "UNKNOWN",
             "trend": "UNKNOWN",
-            "strength": 0,
-            "structure": []
+            "strength": 0
         }
 
     highs, lows = find_swing_points(
@@ -268,131 +513,103 @@ def analyze_structure(candles):
         window=3
     )
 
-    structure = []
+    high_structure, low_structure = classify_structure(
+        highs,
+        lows
+    )
+
+    trend, strength = determine_trend(
+        high_structure,
+        low_structure
+    )
+
+    momentum = calculate_momentum(
+        candles
+    )
+
+    volatility = calculate_volatility(
+        candles
+    )
+
+    volume = analyze_volume(
+        candles
+    )
+
+    levels = calculate_levels(
+        candles,
+        highs,
+        lows
+    )
+
+    range_data = calculate_range_position(
+        candles
+    )
+
+    breakout = detect_breakout(
+        candles,
+        highs,
+        lows
+    )
 
     # --------------------------------------------------------
-    # Анализ максимумов
+    # Определяем режим рынка
     # --------------------------------------------------------
 
-    if len(highs) >= 2:
+    if breakout != "NONE":
+        regime = breakout
 
-        for i in range(1, len(highs)):
+    elif trend == "UP" and momentum["direction"] == "POSITIVE":
+        regime = "TREND_UP"
 
-            previous = highs[i - 1]["price"]
-            current = highs[i]["price"]
+    elif trend == "DOWN" and momentum["direction"] == "NEGATIVE":
+        regime = "TREND_DOWN"
 
-            if current > previous:
+    elif trend == "UP" and momentum["direction"] == "NEGATIVE":
+        regime = "CORRECTION"
 
-                structure.append("HH")
+    elif trend == "DOWN" and momentum["direction"] == "POSITIVE":
+        regime = "CORRECTION"
 
-            else:
-
-                structure.append("LH")
-
-    # --------------------------------------------------------
-    # Анализ минимумов
-    # --------------------------------------------------------
-
-    if len(lows) >= 2:
-
-        for i in range(1, len(lows)):
-
-            previous = lows[i - 1]["price"]
-            current = lows[i]["price"]
-
-            if current > previous:
-
-                structure.append("HL")
-
-            else:
-
-                structure.append("LL")
-
-    # --------------------------------------------------------
-    # Если структура не определена
-    # --------------------------------------------------------
-
-    if not structure:
-
-        return {
-            "trend": "RANGE",
-            "strength": 0,
-            "structure": []
-        }
-
-    # Берём последние элементы структуры
-    recent = structure[-8:]
-
-    hh = recent.count("HH")
-    hl = recent.count("HL")
-
-    lh = recent.count("LH")
-    ll = recent.count("LL")
-
-    bullish_score = hh + hl
-    bearish_score = lh + ll
-
-    # --------------------------------------------------------
-    # Определение направления
-    # --------------------------------------------------------
-
-    if bullish_score >= bearish_score + 2:
-
-        trend = "UP"
-
-    elif bearish_score >= bullish_score + 2:
-
-        trend = "DOWN"
+    elif trend == "RANGE":
+        regime = "RANGE"
 
     else:
-
-        trend = "RANGE"
-
-    # --------------------------------------------------------
-    # Сила структуры
-    # --------------------------------------------------------
-
-    total = max(
-        len(recent),
-        1
-    )
-
-    strength = round(
-        abs(
-            bullish_score -
-            bearish_score
-        )
-        /
-        total
-        *
-        100,
-        1
-    )
+        regime = "TRANSITION"
 
     return {
+        "regime": regime,
         "trend": trend,
         "strength": strength,
-        "structure": recent
+
+        "high_structure": high_structure[-5:],
+        "low_structure": low_structure[-5:],
+
+        "momentum": momentum,
+
+        "volatility": volatility,
+
+        "volume": volume,
+
+        "support": levels["support"],
+        "resistance": levels["resistance"],
+
+        "range": range_data,
+
+        "breakout": breakout
     }
 
 
 # ============================================================
-# АНАЛИЗ ОДНОЙ МОНЕТЫ
+# АНАЛИЗ МОНЕТЫ
 # ============================================================
 
 def analyze_coin(coin):
-
     candles = coin["candles"]
 
     result = {}
 
-    for timeframe in [
-        "15m",
-        "1h",
-        "4h"
-    ]:
-
-        result[timeframe] = analyze_structure(
+    for timeframe in ["15m", "1h", "4h"]:
+        result[timeframe] = analyze_market_state(
             candles[timeframe]
         )
 
@@ -400,7 +617,136 @@ def analyze_coin(coin):
 
 
 # ============================================================
-# МОНИТОР РЫНКА
+# MULTI-TIMEFRAME ANALYSIS
+# ============================================================
+
+def analyze_multi_timeframe(analysis):
+    tf_15m = analysis["15m"]
+    tf_1h = analysis["1h"]
+    tf_4h = analysis["4h"]
+
+    trends = [
+        tf_15m["trend"],
+        tf_1h["trend"],
+        tf_4h["trend"]
+    ]
+
+    up_count = trends.count("UP")
+    down_count = trends.count("DOWN")
+
+    # Полное совпадение
+    if up_count == 3:
+        alignment = "STRONG_LONG_BIAS"
+
+    elif down_count == 3:
+        alignment = "STRONG_SHORT_BIAS"
+
+    # Старшие ТФ вверх, младший вниз
+    elif (
+        tf_4h["trend"] == "UP"
+        and tf_1h["trend"] == "UP"
+        and tf_15m["trend"] == "DOWN"
+    ):
+        alignment = "LONG_CORRECTION"
+
+    # Старшие ТФ вниз, младший вверх
+    elif (
+        tf_4h["trend"] == "DOWN"
+        and tf_1h["trend"] == "DOWN"
+        and tf_15m["trend"] == "UP"
+    ):
+        alignment = "SHORT_CORRECTION"
+
+    # Возможный переход
+    elif (
+        tf_4h["trend"] == "UP"
+        and tf_1h["trend"] == "DOWN"
+        and tf_15m["trend"] == "DOWN"
+    ):
+        alignment = "REVERSAL_WATCH_DOWN"
+
+    elif (
+        tf_4h["trend"] == "DOWN"
+        and tf_1h["trend"] == "UP"
+        and tf_15m["trend"] == "UP"
+    ):
+        alignment = "REVERSAL_WATCH_UP"
+
+    else:
+        alignment = "MIXED"
+
+    return alignment
+
+
+# ============================================================
+# ВЫВОД АНАЛИЗА
+# ============================================================
+
+def print_detailed_analysis(coin, analysis):
+    symbol = coin["symbol"]
+
+    print(
+        "\n" + "-" * 80,
+        flush=True
+    )
+
+    print(
+        f"{symbol} | MARKET STATE",
+        flush=True
+    )
+
+    print(
+        "-" * 80,
+        flush=True
+    )
+
+    for timeframe in ["4h", "1h", "15m"]:
+        state = analysis[timeframe]
+
+        momentum = state["momentum"]
+        volatility = state["volatility"]
+        volume = state["volume"]
+
+        print(
+            f"{timeframe:>3} | "
+            f"REGIME={state['regime']:18} | "
+            f"TREND={state['trend']:5} | "
+            f"STRENGTH={state['strength']:5.1f}% | "
+            f"MOM={momentum['direction']:8} "
+            f"{momentum['change_pct']:+.2f}% | "
+            f"VOL={volume['state']:8} "
+            f"x{volume['ratio']:.2f}",
+            flush=True
+        )
+
+        print(
+            f"     Structure: "
+            f"HH/LH={state['high_structure']} "
+            f"HL/LL={state['low_structure']}",
+            flush=True
+        )
+
+        print(
+            f"     Support={state['support']} | "
+            f"Resistance={state['resistance']} | "
+            f"ATR={volatility['atr_pct']:.3f}% | "
+            f"Range position="
+            f"{state['range']['position_pct']:.1f}%",
+            flush=True
+        )
+
+    alignment = analyze_multi_timeframe(
+        analysis
+    )
+
+    print(
+        f"MULTI-TF ALIGNMENT: {alignment}",
+        flush=True
+    )
+
+
+# ============================================================
+# MARKET MONITOR
 # ============================================================
 
 def market_monitor():
@@ -410,29 +756,25 @@ def market_monitor():
         try:
 
             print(
-                "\n" + "=" * 70,
+                "\n" + "=" * 80,
                 flush=True
             )
 
             print(
-                "BYBIT MARKET ANALYZER",
+                "BYBIT CRYPTO MARKET ANALYZER",
                 flush=True
             )
 
             print(
-                "Загрузка 30 монет "
-                "и свечей 15m / 1h / 4h",
+                "PRICE + STRUCTURE + MOMENTUM + "
+                "VOLUME + VOLATILITY",
                 flush=True
             )
 
             print(
-                "=" * 70,
+                "=" * 80,
                 flush=True
             )
-
-            # ------------------------------------------------
-            # TOP 30
-            # ------------------------------------------------
 
             coins = get_top_30()
 
@@ -441,66 +783,22 @@ def market_monitor():
                 flush=True
             )
 
-            # ------------------------------------------------
-            # СВЕЧИ
-            # ------------------------------------------------
-
             market_data = load_market_data(
                 coins
             )
 
             print(
-                "\n" + "-" * 70,
+                "\n" + "=" * 80,
                 flush=True
             )
 
             print(
-                f"Получено данных: "
-                f"{len(market_data)}/30 монет",
+                "DEEP MARKET ANALYSIS",
                 flush=True
             )
 
             print(
-                "-" * 70,
-                flush=True
-            )
-
-            # ------------------------------------------------
-            # КРАТКИЙ СПИСОК ДАННЫХ
-            # ------------------------------------------------
-
-            for coin in market_data:
-
-                print(
-                    f"{coin['symbol']:15} "
-                    f"Price: {coin['price']} | "
-                    f"24h: "
-                    f"{coin['change']:+.2f}% | "
-                    f"15m: "
-                    f"{len(coin['candles']['15m'])} | "
-                    f"1h: "
-                    f"{len(coin['candles']['1h'])} | "
-                    f"4h: "
-                    f"{len(coin['candles']['4h'])}",
-                    flush=True
-                )
-
-            # =================================================
-            # АНАЛИЗ СТРУКТУРЫ
-            # =================================================
-
-            print(
-                "\n" + "=" * 70,
-                flush=True
-            )
-
-            print(
-                "MARKET STRUCTURE",
-                flush=True
-            )
-
-            print(
-                "=" * 70,
+                "=" * 80,
                 flush=True
             )
 
@@ -510,22 +808,23 @@ def market_monitor():
                     coin
                 )
 
-                print(
-                    f"{coin['symbol']:15} | "
-                    f"15m: "
-                    f"{analysis['15m']['trend']:5} "
-                    f"({analysis['15m']['strength']:4.1f}%) | "
-                    f"1h: "
-                    f"{analysis['1h']['trend']:5} "
-                    f"({analysis['1h']['strength']:4.1f}%) | "
-                    f"4h: "
-                    f"{analysis['4h']['trend']:5} "
-                    f"({analysis['4h']['strength']:4.1f}%)",
-                    flush=True
+                print_detailed_analysis(
+                    coin,
+                    analysis
                 )
 
             print(
-                "=" * 70,
+                "\n" + "=" * 80,
+                flush=True
+            )
+
+            print(
+                "ANALYSIS CYCLE COMPLETE",
+                flush=True
+            )
+
+            print(
+                "=" * 80,
                 flush=True
             )
 
@@ -536,11 +835,9 @@ def market_monitor():
                 flush=True
             )
 
-        # =====================================================
-        # Следующий цикл через 60 секунд
-        # =====================================================
-
-        time.sleep(60)
+        time.sleep(
+            MONITOR_INTERVAL
+        )
 
 
 # ============================================================
@@ -549,24 +846,24 @@ def market_monitor():
 
 @app.get("/")
 def home():
-
     return {
         "status": "online",
         "service": "Crypto Market Analyzer",
-        "exchange": "Bybit"
+        "exchange": "Bybit",
+        "coins": TOP_COINS,
+        "timeframes": ["15m", "1h", "4h"]
     }
 
 
 @app.get("/health")
 def health():
-
     return {
         "status": "ok"
     }
 
 
 # ============================================================
-# ЗАПУСК МОНИТОРА ПРИ СТАРТЕ FASTAPI
+# STARTUP
 # ============================================================
 
 @app.on_event("startup")
