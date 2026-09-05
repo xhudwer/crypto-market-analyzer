@@ -91,11 +91,15 @@ def home():
 def health():
     return {"status": "ok"}
 
-
 @app.on_event("startup")
 def startup_event():
+    print(">>> STARTUP EVENT WORKS <<<", flush=True)
+
     thread = threading.Thread(
         target=market_monitor,
         daemon=True
     )
     thread.start()
+
+    print(">>> MARKET MONITOR THREAD STARTED <<<", flush=True)
+
